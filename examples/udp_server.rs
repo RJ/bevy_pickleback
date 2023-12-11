@@ -11,7 +11,7 @@ fn main() {
     let mut app = App::new();
     app.add_plugins(
         MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
-            0.045,
+            0.016,
         ))),
     )
     .add_plugins(LogPlugin::default())

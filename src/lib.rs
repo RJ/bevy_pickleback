@@ -16,33 +16,62 @@ pub struct Client(PicklebackClient);
 
 pub struct PicklebackClientPlugin;
 
+#[derive(Event, Debug)]
+pub enum PickebackClientState {
+    Connecting,
+    Connected,
+    Disconnected(DisconnectReason),
+}
+
 impl Plugin for PicklebackClientPlugin {
     fn build(&self, app: &mut App) {
         let config = PicklebackConfig::default();
-        let server_addr = "127.0.0.1:6000"
+        let server_addr = "127.0.0.1:5000"
             .parse()
             .expect("failed parsing server addr");
         let mut client = PicklebackClient::new(0.0, &config);
         client.connect(server_addr);
         app.insert_resource(Client(client));
-        let socket = UdpSocket::bind("127.0.0.1:0").expect("couldn't bind");
+        let socket = UdpSocket::bind("127.0.0.1:60002").expect("couldn't bind");
         socket
             .set_nonblocking(true)
             .expect("Couldn't set nonblocking");
         let transport = ClientTransport {
             socket,
-            server_addr: "127.0.0.1:6000".parse().expect("server addr error"),
+            server_addr,
         };
         app.insert_resource(transport);
+
+        app.add_event::<PickebackClientState>();
         app.add_systems(PreUpdate, Self::update);
         app.add_systems(PreUpdate, Self::send_packets);
     }
 }
 
 impl PicklebackClientPlugin {
-    fn update(mut client: ResMut<Client>, transport: ResMut<ClientTransport>, time: Res<Time>) {
+    fn update(
+        mut client: ResMut<Client>,
+        transport: ResMut<ClientTransport>,
+        time: Res<Time>,
+        mut ev_states: EventWriter<PickebackClientState>,
+    ) {
         let mut buffer = [0_u8; 1500];
         client.update(time.delta_seconds_f64());
+
+        // write state changes to events
+        for state in client.drain_state_transitions() {
+            match state {
+                ClientState::Connected => ev_states.send(PickebackClientState::Connected),
+                ClientState::SendingConnectionRequest => {
+                    ev_states.send(PickebackClientState::Connecting)
+                }
+                ClientState::SelfInitiatedDisconnect => {}
+                ClientState::SendingChallengeResponse => {}
+                ClientState::Disconnected(reason) => {
+                    ev_states.send(PickebackClientState::Disconnected(reason))
+                }
+            }
+        }
 
         loop {
             let (packet, source) = match transport.socket.recv_from(&mut buffer) {
@@ -131,7 +160,7 @@ impl Plugin for PicklebackServerPlugin {
         let config = PicklebackConfig::default();
         let time = 0.0;
         let server = PicklebackServer::new(time, &config);
-        let socket = UdpSocket::bind("127.0.0.1:6000").expect("Couldn't bind to server socket");
+        let socket = UdpSocket::bind("127.0.0.1:5000").expect("Couldn't bind to server socket");
         socket
             .set_nonblocking(true)
             .expect("Failed setting nonblocking on socket");
