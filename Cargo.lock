@@ -2727,6 +2727,7 @@ name = "pickleback"
 version = "0.1.0"
 dependencies = [
  "assert_float_eq",
+ "bevy",
  "byteorder",
  "enum_dispatch",
  "env_logger",

@@ -11,17 +11,7 @@ pub struct ClientTransport {
     server_addr: SocketAddr,
 }
 
-#[derive(Resource, Deref, DerefMut)]
-pub struct Client(PicklebackClient);
-
 pub struct PicklebackClientPlugin;
-
-#[derive(Event, Debug)]
-pub enum PickebackClientState {
-    Connecting,
-    Connected,
-    Disconnected(DisconnectReason),
-}
 
 impl Plugin for PicklebackClientPlugin {
     fn build(&self, app: &mut App) {
@@ -31,7 +21,7 @@ impl Plugin for PicklebackClientPlugin {
             .expect("failed parsing server addr");
         let mut client = PicklebackClient::new(0.0, &config);
         client.connect(server_addr);
-        app.insert_resource(Client(client));
+        app.insert_resource(client);
         let socket = UdpSocket::bind("127.0.0.1:60002").expect("couldn't bind");
         socket
             .set_nonblocking(true)
@@ -42,7 +32,7 @@ impl Plugin for PicklebackClientPlugin {
         };
         app.insert_resource(transport);
 
-        app.add_event::<PickebackClientState>();
+        app.add_event::<ClientState>();
         app.add_systems(PreUpdate, Self::update);
         app.add_systems(PreUpdate, Self::send_packets);
     }
@@ -50,28 +40,18 @@ impl Plugin for PicklebackClientPlugin {
 
 impl PicklebackClientPlugin {
     fn update(
-        mut client: ResMut<Client>,
+        mut client: ResMut<PicklebackClient>,
         transport: ResMut<ClientTransport>,
         time: Res<Time>,
-        mut ev_states: EventWriter<PickebackClientState>,
+        mut ev_states: EventWriter<ClientState>,
     ) {
-        let mut buffer = [0_u8; 1500];
+        let mut buffer = [0_u8; 1500]; // TODO don't allocate each time
         client.update(time.delta_seconds_f64());
 
         // write state changes to events
-        for state in client.drain_state_transitions() {
-            match state {
-                ClientState::Connected => ev_states.send(PickebackClientState::Connected),
-                ClientState::SendingConnectionRequest => {
-                    ev_states.send(PickebackClientState::Connecting)
-                }
-                ClientState::SelfInitiatedDisconnect => {}
-                ClientState::SendingChallengeResponse => {}
-                ClientState::Disconnected(reason) => {
-                    ev_states.send(PickebackClientState::Disconnected(reason))
-                }
-            }
-        }
+        client
+            .drain_state_transitions()
+            .for_each(|s| ev_states.send(s));
 
         loop {
             let (packet, source) = match transport.socket.recv_from(&mut buffer) {
@@ -94,7 +74,7 @@ impl PicklebackClientPlugin {
             }
         }
     }
-    fn send_packets(mut client: ResMut<Client>, transport: ResMut<ClientTransport>) {
+    fn send_packets(mut client: ResMut<PicklebackClient>, transport: ResMut<ClientTransport>) {
         client.visit_packets_to_send(|addr, packet| {
             if let Err(e) = transport.socket.send_to(packet, addr) {
                 error!("{e:?}");
@@ -110,49 +90,6 @@ pub struct ServerTransport {
     socket: UdpSocket,
 }
 
-#[derive(Resource, Deref, DerefMut)]
-pub struct Server(PicklebackServer);
-
-impl Server {
-    pub fn connected_clients(&mut self) -> impl Iterator<Item = &mut ConnectedClient> {
-        self.connected_clients_mut()
-    }
-    pub fn kick_client(&mut self, client_id: u64) {
-        self.disconnect_client(client_id);
-    }
-    pub fn get_messages(
-        &mut self,
-        channel: u8,
-    ) -> impl Iterator<Item = (u64, ReceivedMessagesContainer)> {
-        self.connected_clients_mut()
-            .map(move |cc| (cc.id(), cc.pickleback.drain_received_messages(channel)))
-    }
-    pub fn get_acks(
-        &mut self,
-        channel: u8,
-    ) -> impl Iterator<Item = (u64, ReceivedMessagesContainer)> {
-        self.connected_clients_mut()
-            .map(move |cc| (cc.id(), cc.pickleback.drain_received_messages(channel)))
-    }
-    pub fn send_message(
-        &mut self,
-        client_id: u64,
-        channel: u8,
-        message_payload: &[u8],
-    ) -> Result<MessageId, PicklebackError> {
-        let Some(cc) = self.get_connected_client_by_salt_mut(client_id) else {
-            return Err(PicklebackError::NoSuchClient);
-        };
-        cc.send_message(channel, message_payload)
-    }
-    /// Broadcast a message to all connected clients, discarding errors and MessageIds
-    pub fn broadcast_message(&mut self, channel: u8, message_payload: &[u8]) {
-        for cc in self.connected_clients_mut() {
-            let _ = cc.pickleback.send_message(channel, message_payload);
-        }
-    }
-}
-
 pub struct PicklebackServerPlugin;
 
 impl Plugin for PicklebackServerPlugin {
@@ -165,7 +102,7 @@ impl Plugin for PicklebackServerPlugin {
             .set_nonblocking(true)
             .expect("Failed setting nonblocking on socket");
         let transport = ServerTransport { socket };
-        let server = Server(server);
+        app.add_event::<ServerEvent>();
         app.insert_resource(transport);
         app.insert_resource(server);
 
@@ -175,8 +112,16 @@ impl Plugin for PicklebackServerPlugin {
 }
 
 impl PicklebackServerPlugin {
-    fn advance(transport: ResMut<ServerTransport>, mut server: ResMut<Server>, time: Res<Time>) {
+    fn advance(
+        transport: ResMut<ServerTransport>,
+        mut server: ResMut<PicklebackServer>,
+        mut events: EventWriter<ServerEvent>,
+        time: Res<Time>,
+    ) {
         server.update(time.delta_seconds_f64());
+        // write client connect/disconnect events to bevy
+        server.drain_server_events().for_each(|e| events.send(e));
+        // recv packets
         let mut buffer = [0_u8; 1500];
         loop {
             match transport.socket.recv_from(&mut buffer) {
@@ -197,7 +142,7 @@ impl PicklebackServerPlugin {
         }
     }
 
-    fn send(transport: ResMut<ServerTransport>, mut server: ResMut<Server>) {
+    fn send(transport: ResMut<ServerTransport>, mut server: ResMut<PicklebackServer>) {
         server.visit_packets_to_send(|addr, packet| {
             if let Err(e) = transport.socket.send_to(packet, addr) {
                 error!("error sending to {addr:?} = {e:?}");
