@@ -1,6 +1,5 @@
 use bevy::{log::LogPlugin, prelude::*};
-use bevy_pickleback::*;
-use pickleback::prelude::*;
+use bevy_pickleback::prelude::*;
 
 fn main() {
     let mut app = App::new();

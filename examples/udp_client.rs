@@ -1,6 +1,5 @@
 use bevy::{app::ScheduleRunnerPlugin, log::LogPlugin, prelude::*};
-use bevy_pickleback::*;
-use pickleback::{prelude::ClientState, PicklebackClient};
+use bevy_pickleback::prelude::*;
 use std::time::Duration;
 
 fn main() {
@@ -16,7 +15,15 @@ fn main() {
         // otherwise we'll miss events..
         .add_plugins(PicklebackClientPlugin)
         .add_systems(Update, (process_events, dump_stats))
+        .add_systems(Startup, connect)
         .run();
+}
+
+fn connect(mut client: ResMut<PicklebackClient>, mut transport: ResMut<ClientTransport>) {
+    transport
+        .connect("127.0.0.1:5000")
+        .expect("Failed to connect socket");
+    client.connect();
 }
 
 fn process_events(mut ev: ResMut<Events<ClientState>>) {
